@@ -13,12 +13,14 @@ class RotaryPositionalEmbedding(nn.Module):
     Rotary Positional Embeddings as described in https://arxiv.org/abs/2104.09864.
     """
 
-    def __init__(self, d_head, context_length=2048, rope_base=10000):
+    def __init__(
+        self, d_head: int, context_length: int = 2048, rope_base: int = 10000
+    ) -> None:
         """
         Args:
-            d_head (int): Dimension of each attention head (must be even).
-            context_length (int): Model context length
-            rope_base (int): Base for the frequency computation.
+            d_head: Dimension of each attention head (must be even).
+            context_length: Model context length
+            rope_base: Base for the frequency computation.
         """
         super().__init__()
 
@@ -43,15 +45,15 @@ class RotaryPositionalEmbedding(nn.Module):
         self.cos_cached = torch.cos(freqs)
         self.sin_cached = torch.sin(freqs)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Applies rotary positional embeddings to tensor x.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, seq_length, n_heads, d_head].
+            x: Input tensor of shape [batch_size, seq_length, n_heads, d_head].
 
         Returns:
-            torch.Tensor: Tensor after applying rotary positional embeddings.
+            Tensor after applying rotary positional embeddings.
         """
         # x should have head dimension equal to self.dim.
         batch_size, seq_len, n_heads = x.size(0), x.size(1), x.size(2)
