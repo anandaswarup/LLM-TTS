@@ -9,6 +9,10 @@ from einops import repeat
 
 
 class RotaryPositionalEmbedding(nn.Module):
+    """
+    Rotary Positional Embeddings as described in https://arxiv.org/abs/2104.09864.
+    """
+
     def __init__(self, d_head, context_length=2048, rope_base=10000):
         """
         Args:
