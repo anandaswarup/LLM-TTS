@@ -41,9 +41,9 @@ def apply_rotary_embedding(x: torch.Tensor, freqs_cache: torch.Tensor) -> torch.
     Apply rotary positional embeddings to a tensor.
 
     Args:
-        x: Input tensor of shape [batch_size, seq_len, num_heads, d_head]
+        x: Input tensor of shape [batch_size, num_heads, seq_len, d_head]
         freqs_cache: Precomputed rotary frequencies from precompute_rotary_freqencies
-                    with shape [seq_len, d_head/2, 2] where the last dimension
+                    with shape [seq_len, d_head//2, 2] where the last dimension
                     contains [cos, sin] values
     """
     # Extract sequence length and verify it doesn't exceed cache length
