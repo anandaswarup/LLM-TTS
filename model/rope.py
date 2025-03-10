@@ -1,5 +1,5 @@
 """
-Rotary Positional Embeddings used in the LLM-TTS model, which is a LLaMA-style auto-regressive Transformer to
+Rotary Positional Embeddings layer used in the LLM-TTS model, which is a LLaMA-style auto-regressive Transformer to
 predict discrete acoustic tokens conditioned on text input.
 """
 
