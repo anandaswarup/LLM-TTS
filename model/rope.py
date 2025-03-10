@@ -1,6 +1,6 @@
 """
-Rotary Positional Embeddings Module. This module implements the rotary positional embeddings as described in
-https://arxiv.org/abs/2104.09864.
+Rotary Positional Embeddings used in the LLM-TTS model, which is a LLaMA-style auto-regressive Transformer to
+predict discrete acoustic tokens conditioned on text input.
 """
 
 import torch
