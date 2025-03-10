@@ -4,77 +4,71 @@ https://arxiv.org/abs/2104.09864.
 """
 
 import torch
-import torch.nn as nn
-from einops import repeat
+from einops import rearrange
 
 
-class RotaryPositionalEmbedding(nn.Module):
+def precompute_rotary_freqencies(
+    dim: int, model_context: int, rope_theta: float = 50000.0
+) -> torch.Tensor:
     """
-    Rotary Positional Embeddings as described in https://arxiv.org/abs/2104.09864.
+    Precompute the rotary positional frequencies for each position in the sequence.
+
+    Args:
+        dim (int): The dimension of the positional embeddings. Must be equal to d_model // num_heads, where d_model is
+            the transformer model dimension and num_heads is the number of attention heads.
+        model_context (int): Length of the max sequence that the model can handle.
+        rope_theta (float): The theta value for the rope positional embeddings.
     """
+    # Compute the frequencies for each position in the sequence
+    inv_freqs = 1.0 / (
+        rope_theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+    )
 
-    def __init__(
-        self, d_head: int, context_length: int = 2048, rope_base: int = 10000
-    ) -> None:
-        """
-        Args:
-            d_head: Dimension of each attention head (must be even).
-            context_length: Model context length
-            rope_base: Base for the frequency computation.
-        """
-        super().__init__()
+    # Compute the indices for each position in the sequence
+    idxs = torch.arange(model_context, device=inv_freqs.device, dtype=torch.float32)
 
-        assert d_head % 2 == 0, "Dimension must be even for rotary embeddings."
+    # Use torch.einsum to compute the outer product of idxs and freqs.
+    angles = torch.einsum("i,j->ij", idxs, inv_freqs)
 
-        self.d_head = d_head
-        self.context_length = context_length
-        self.rope_base = rope_base
+    # Stack cos and sin values along the last dimension
+    freqs_cache = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
 
-        # Compute the inverse frequency for each pair of dimensions.
-        inv_freq = 1.0 / (
-            rope_base ** (torch.arange(0, d_head, 2, dtype=torch.float32) / d_head)
+    return freqs_cache
+
+
+def apply_rotary_embedding(x: torch.Tensor, freqs_cache: torch.Tensor) -> torch.Tensor:
+    """
+    Apply rotary positional embeddings to a tensor.
+
+    Args:
+        x: Input tensor of shape [batch_size, seq_len, num_heads, d_head]
+        freqs_cache: Precomputed rotary frequencies from precompute_rotary_freqencies
+                    with shape [seq_len, d_head/2, 2] where the last dimension
+                    contains [cos, sin] values
+    """
+    # Extract sequence length and verify it doesn't exceed cache length
+    seq_len = x.shape[1]
+    if seq_len > freqs_cache.shape[0]:
+        raise ValueError(
+            f"Input sequence length {seq_len} exceeds maximum cached length {freqs_cache.shape[0]}"
         )
 
-        # Create position indices [0, 1, ..., max_seq_len - 1]
-        positions = torch.arange(context_length, dtype=torch.float32)
+    # Get cosine and sine values for the current sequence
+    cos = freqs_cache[:seq_len, :, 0]  # [seq_len, d_head//2]
+    sin = freqs_cache[:seq_len, :, 1]  # [seq_len, d_head//2]
 
-        # Precompute the sinusoidal frequencies. Shape: [context_length, d_head//2]
-        freqs = torch.einsum("i,j->ij", positions, inv_freq)
+    # Rearrange for broadcasting with einops
+    cos = rearrange(cos, "s h -> 1 s 1 h")  # [1, seq_len, 1, d_head//2]
+    sin = rearrange(sin, "s h -> 1 s 1 h")  # [1, seq_len, 1, d_head//2]
 
-        # Precompute cosine and sine caches. Shape: [context_length, d_head//2]
-        self.cos_cached = torch.cos(freqs)
-        self.sin_cached = torch.sin(freqs)
+    # Split tensor along the last dimension
+    x1, x2 = x.chunk(2, dim=-1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Applies rotary positional embeddings to tensor x.
+    # Apply rotary embeddings to the two halves of the input tensor
+    x1_rotated = x1 * cos - x2 * sin
+    x2_rotated = x1 * sin + x2 * cos
 
-        Args:
-            x: Input tensor of shape [batch_size, seq_length, n_heads, d_head].
+    # Concatenate the rotated tensors
+    x_rotated = torch.cat([x1_rotated, x2_rotated], dim=-1)
 
-        Returns:
-            Tensor after applying rotary positional embeddings.
-        """
-        # x should have head dimension equal to self.dim.
-        batch_size, seq_len, n_heads = x.size(0), x.size(1), x.size(2)
-
-        # Get the cached cosine and sine for the current sequence length.
-
-        cos = self.cos_cached[:seq_len].to(x.device)  # shape: [seq_len, d_head//2]
-        sin = self.sin_cached[:seq_len].to(x.device)  # shape: [seq_len, d_head//2]
-
-        # Expand dimensions to match x's shape: [batch, seq_length, n_heads, d_head//2]
-        cos = repeat(cos, "l d -> b l n d", b=batch_size, n=n_heads)
-        sin = repeat(sin, "l d -> b l n d", b=batch_size, n=n_heads)
-
-        # Split the input tensor into two halves along the head dimension.
-        x1 = x[..., : self.d_head // 2]
-        x2 = x[..., self.d_head // 2 :]
-
-        # Apply rotary transformation.
-        # For each half: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
-        x_first_half_rotated = x1 * cos - x2 * sin
-        x_second_half_rotated = x1 * sin + x2 * cos
-
-        # Concatenate the rotated halves.
-        return torch.cat([x_first_half_rotated, x_second_half_rotated], dim=-1)
+    return x_rotated
