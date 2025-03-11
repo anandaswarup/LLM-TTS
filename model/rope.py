@@ -21,8 +21,8 @@ class RotaryEmbedding(nn.Module):
         d_model: int,
         num_heads: int,
         model_context: int,
-        rope_theta: float = 50000.0,
-    ):
+        rope_theta: float = 500000.0,
+    ) -> None:
         """
         Initialize the RotaryEmbedding module.
 
