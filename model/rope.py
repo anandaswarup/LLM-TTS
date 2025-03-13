@@ -4,122 +4,72 @@ predict discrete acoustic tokens conditioned on text input.
 """
 
 import torch
-import torch.nn as nn
 from einops import rearrange
 
 
-class RotaryEmbedding(nn.Module):
+def build_rope_cache(
+    model_context: int, d_head: int, rope_base: float = 500000.0
+) -> torch.Tensor:
     """
-    PyTorch module for Rotary Positional Embeddings (RoPE).
+    Precompute the frequency cache for the Rotary Positional Embeddings.
 
-    This module precomputes the rotary embeddings during initialization and provides
-    methods to apply them efficiently to query and key tensors in attention mechanisms.
+    Args:
+        model_context (int): The length of the max sequence that the model can handle.
+        d_head (int): The dimension of the attention head.
+        rope_base (float): The base value for frequency computation.
+
+    Returns:
+        torch.Tensor: The frequency cache tensor of shape [model_context, d_head//2, 2].
     """
+    # Compute the theta values
+    theta = 1.0 / (rope_base ** (torch.arange(0, d_head, 2) / d_head))
 
-    def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        model_context: int,
-        rope_theta: float = 500000.0,
-    ) -> None:
-        """
-        Initialize the RotaryEmbedding module.
+    # Compute the positions for the cache
+    positions_idx = torch.arange(model_context)
 
-        Args:
-            d_model (int): Transformer model dimension
-            num_heads (int): Number of attention heads
-            model_context (int): Length of the max sequence that the model can handle.
-            rope_theta (float): The base value for frequency computation.
-        """
-        super().__init__()
+    # Compute the angles; dot product of positions and theta
+    angles = torch.einsum("i, j -> ij", positions_idx, theta)
 
-        if (d_model // num_heads) % 2 != 0:
-            raise ValueError(f"Dimension must be even, got {d_model // num_heads}")
+    # Compute the frequencies
+    freqs_cache = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
 
-        self.dim = d_model // num_heads
-        self.model_context = model_context
-        self.rope_theta = rope_theta
+    return freqs_cache
 
-        # Precompute frequencies during initialization
-        self.register_buffer("freqs_cache", self._precompute_freqs())
 
-    def _precompute_freqs(self) -> torch.Tensor:
-        """
-        Precompute the rotary positional frequencies for each position in the sequence.
+def apply_rotary_embedding(x: torch.Tensor, freqs_cache: torch.Tensor) -> torch.Tensor:
+    """
+    Apply Rotary Positional Embeddings to the input tensor.
 
-        Returns:
-            Tensor containing cached frequency values with shape [model_context, dim//2, 2]
-        """
-        # Compute the frequencies for each position in the sequence
-        inv_freqs = 1.0 / (
-            self.rope_theta
-            ** (torch.arange(0, self.dim, 2)[: (self.dim // 2)].float() / self.dim)
-        )
+    Args:
+        x (torch.Tensor): The input tensor of shape [batch_size, num_heads, seq_len, d_head].
+        freqs_cache (torch.Tensor): The frequency cache tensor of shape [model_context, d_head//2, 2].
 
-        # Compute the indices for each position in the sequence
-        idxs = torch.arange(self.model_context, dtype=torch.float32)
+    Returns:
+        torch.Tensor: The output tensor of shape [batch_size, num_heads, seq_len, d_head].
+    """
+    T = x.size(2)
+    d_head = x.size(3)
 
-        # Use torch.einsum to compute the outer product of idxs and freqs
-        angles = torch.einsum("i,j->ij", idxs, inv_freqs)
+    assert T <= freqs_cache.size(0), (
+        "Input sequence length is greater than model context."
+    )
+    freqs_cache = freqs_cache[:T]
 
-        # Stack cos and sin values along the last dimension
-        freqs_cache = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
+    # Convert to float for precision
+    x = x.float()
 
-        return freqs_cache
+    # Get cos and sin components
+    cos = freqs_cache[..., 0]  # [T, d_head//2]
+    sin = freqs_cache[..., 1]  # [T, d_head//2]
 
-    def apply_embedding(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply rotary positional embeddings to a tensor.
+    # Reshape for broadcasting
+    cos = rearrange(cos, "t d -> () () t d")
+    sin = rearrange(sin, "t d -> () () t d")
 
-        Args:
-            x: Input tensor of shape [batch_size, num_heads or num_kv_heads, seq_len, d_head]
+    # Split the head dimension explicitly without using rearrange
+    x1, x2 = x[..., : d_head // 2], x[..., d_head // 2 :]
 
-        Returns:
-            Rotated tensor with the same shape as input
-        """
-        # Extract sequence length and verify it doesn't exceed cache length
-        seq_len = x.shape[2]
-        if seq_len > self.freqs_cache.shape[0]:
-            raise ValueError(
-                f"Input sequence length {seq_len} exceeds maximum cached length {self.freqs_cache.shape[0]}"
-            )
+    # Apply rotation
+    x_out = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
-        # Get cosine and sine values for the current sequence
-        cos = self.freqs_cache[:seq_len, :, 0]  # [seq_len, dim//2]
-        sin = self.freqs_cache[:seq_len, :, 1]  # [seq_len, dim//2]
-
-        # Rearrange for broadcasting with einops
-        # Transform to [1, 1, seq_len, d_head//2] for proper broadcasting
-        cos = rearrange(cos, "s h -> 1 1 s h")
-        sin = rearrange(sin, "s h -> 1 1 s h")
-
-        # Split tensor along the last dimension
-        x1, x2 = x.chunk(2, dim=-1)
-
-        # Apply rotary embeddings to the two halves of the input tensor
-        x1_rotated = x1 * cos - x2 * sin
-        x2_rotated = x1 * sin + x2 * cos
-
-        # Concatenate the rotated tensors
-        x_rotated = torch.cat([x1_rotated, x2_rotated], dim=-1)
-
-        return x_rotated
-
-    def forward(
-        self, q: torch.Tensor, k: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Apply rotary embeddings to both query and key tensors.
-
-        Args:
-            q: Query tensor of shape [batch_size, num_heads, seq_len, d_head]
-            k: Key tensor of shape [batch_size, num_kv_heads, seq_len, d_head]
-
-        Returns:
-            Tuple of (rotated query tensor, rotated key tensor) with same shapes as inputs
-        """
-        q_rotated = self.apply_embedding(q)
-        k_rotated = self.apply_embedding(k)
-
-        return q_rotated, k_rotated
+    return x_out.type_as(x)
