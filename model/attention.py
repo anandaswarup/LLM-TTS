@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from model.rope import RotaryEmbedding
+from model.rope import apply_rotary_embedding
 
 
 class Attention(nn.Module):
@@ -19,8 +19,6 @@ class Attention(nn.Module):
 
     def __init__(
         self,
-        model_context: int,
-        rope_theta: float,
         d_model: int,
         num_heads: int,
         num_kv_heads: int | None = None,
@@ -29,8 +27,6 @@ class Attention(nn.Module):
         Instantiate the Attention layer.
 
         Args:
-            model_context (int): The length of the max sequence that the model can handle.
-            rope_theta (float): The base value for frequency computation.
             d_model (int): Transformer model dimension.
             num_heads (int): The number of attention heads (query heads).
             num_kv_heads (int, optional): The number of key / value heads. If none, it will be set to
@@ -38,14 +34,15 @@ class Attention(nn.Module):
         """
         super().__init__()
 
-        self.model_context = model_context
-        self.rope_theta = rope_theta
         self.d_model = d_model
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
 
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_head = d_model // num_heads
-        self.num_groups = self.num_heads // self.num_kv_heads
+
+        # Number of query groups (for GQA)
+        self.num_query_groups = self.num_heads // self.num_kv_heads
 
         # Linear projections for query, key, value and output
         self.q_proj = nn.Linear(self.d_model, self.num_heads * self.d_head, bias=False)
@@ -57,43 +54,19 @@ class Attention(nn.Module):
         )
         self.o_proj = nn.Linear(self.num_heads * self.d_head, self.d_model, bias=False)
 
-        # Rotary Positional Embeddings
-        self.rope = RotaryEmbedding(
-            self.d_model, self.num_heads, self.model_context, self.rope_theta
-        )
-
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        """
-        Initialize the weights of the linear projections.
-        """
-        nn.init.xavier_normal_(self.q_proj.weight, gain=1.0)
-        if self.q_proj.bias is not None:
-            nn.init.constant_(self.q_proj.bias, 0.0)
-
-        nn.init.xavier_normal_(self.k_proj.weight, gain=1.0)
-        if self.k_proj.bias is not None:
-            nn.init.constant_(self.k_proj.bias, 0.0)
-
-        nn.init.xavier_normal_(self.v_proj.weight, gain=1.0)
-        if self.v_proj.bias is not None:
-            nn.init.constant_(self.v_proj.bias, 0.0)
-
-        nn.init.xavier_normal_(self.o_proj.weight, gain=1.0)
-        if self.o_proj.bias is not None:
-            nn.init.constant_(self.o_proj.bias, 0.0)
-
     def forward(
-        self, x: torch.Tensor, mask: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        rope_freqs: torch.Tensor,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Forward pass of the Attention layer.
 
         Args:
             x (torch.Tensor): The input tensor of shape [batch_size, seq_len, d_model].
-            mask (torch.Tensor, optional): The mask tensor of shape [seq_len, seq_len]. If provided, the attention
-                scores will be masked.
+            rope_freqs (torch.Tensor): The RoPE frequency cache tensor of shape [model_context, d_head//2, 2].
+            mask (torch.Tensor, optional): The mask tensor of shape [seq_len, seq_len] to mask the attention scores
         """
         # Apply linear projections to get query, key and value tensors
         q = self.q_proj(x)
@@ -106,12 +79,13 @@ class Attention(nn.Module):
         v = rearrange(v, "b s (h d) -> b h s d", h=self.num_kv_heads)
 
         # Apply rotary positional embeddings to query and key tensors
-        q, k = self.rope(q, k)
+        q = apply_rotary_embedding(q, rope_freqs)
+        k = apply_rotary_embedding(k, rope_freqs)
 
-        # Repeat k/v heads if num_kv_heads < num_heads
+        # Repeat k/v heads to match the number of query heads
         if self.num_kv_heads < self.num_heads:
-            k = torch.repeat_interleave(k, self.num_groups, dim=1)
-            v = torch.repeat_interleave(v, self.num_groups, dim=1)
+            k = torch.repeat_interleave(k, self.num_query_groups, dim=1)
+            v = torch.repeat_interleave(v, self.num_query_groups, dim=1)
 
         # Compute the attention scores
         attn_scores = torch.einsum("b h s d, b h t d -> b h s t", q, k)
