@@ -30,7 +30,7 @@ class Attention(nn.Module):
             d_model (int): Transformer model dimension.
             num_heads (int): The number of attention heads (query heads).
             num_kv_heads (int, optional): The number of key / value heads. If none, it will be set to
-                num_heads.
+                num_heads, and the attention defaults to Multi Head Attention.
         """
         super().__init__()
 
