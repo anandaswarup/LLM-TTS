@@ -15,7 +15,7 @@ class ModelConfig:
     This class defines model architecture settings for the LLM-TTS model.
     """
 
-    context_length: int = 8192  # Max context length for the model
+    model_context: int = 8192  # Max context length for the model
     rope_base: float = 500000.0  # Base value for frequency computation
     d_model: int = 2048  # Transformer model dimension
     num_heads: int = 32  # Number of attention heads
@@ -25,3 +25,6 @@ class ModelConfig:
     dtype: torch.dtype = (
         torch.bfloat16
     )  # Lower precision dtype to reduce model memory footprint
+    device: torch.device = (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
