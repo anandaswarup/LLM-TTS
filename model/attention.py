@@ -36,7 +36,7 @@ class GroupedQueryAttention(nn.Module):
         num_kv_heads: int,
         model_context: int,
         rope_base: float,
-        dtype: torch.dtype | None = None,
+        dtype: torch.dtype,
     ) -> None:
         """
         Instantiate the Grouped Query Attention layer.
@@ -47,7 +47,7 @@ class GroupedQueryAttention(nn.Module):
             num_kv_heads (int): Number of key / value heads for GQA.
             model_context (int): The length of the max sequence that the model can handle.
             rope_base (float): The base value for frequency computation.
-            dtype (torch.dtype | None): Data type for the attention weights.
+            dtype (torch.dtype): Data type for the attention weights.
         """
         super().__init__()
 
@@ -62,6 +62,8 @@ class GroupedQueryAttention(nn.Module):
 
         self.d_head = d_model // num_heads
         self.group_size = num_heads // num_kv_heads
+
+        self.dtype = dtype
 
         # Linear projections for query, key, value, output
         self.q_proj = nn.Linear(
